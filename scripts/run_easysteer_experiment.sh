@@ -4,14 +4,15 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bash scripts/run_easysteer_experiment.sh [--repo-url URL] [--workdir DIR] [--env-name NAME] [--source PATH]
+  bash scripts/run_easysteer_experiment.sh [--repo-url URL] [--workdir DIR] [--env-name NAME] [--source PATH] [--python-env MODE]
 
 Options:
-  --repo-url URL   Git repo URL for EasySteer.
-  --workdir DIR    Working directory used for setup.
-  --env-name NAME  Conda environment name.
-  --source PATH    Local EasySteer source (directory / .tar.gz / .zip).
-                   If provided, network clone is skipped.
+  --repo-url URL    Git repo URL for EasySteer.
+  --workdir DIR     Working directory used for setup.
+  --env-name NAME   Environment name.
+  --source PATH     Local EasySteer source (directory / .tar.gz / .zip).
+                    If provided, network clone is skipped.
+  --python-env MODE one of: auto | conda | venv. Default: auto.
 USAGE
 }
 
@@ -19,6 +20,7 @@ REPO_URL="https://github.com/ZJU-REAL/EasySteer.git"
 WORKDIR="${HOME}/easysteer_run"
 ENV_NAME="easysteer"
 LOCAL_SOURCE=""
+PYTHON_ENV_MODE="auto"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
       ENV_NAME="$2"; shift 2 ;;
     --source)
       LOCAL_SOURCE="$2"; shift 2 ;;
+    --python-env)
+      PYTHON_ENV_MODE="$2"; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -39,11 +43,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-printf "[1/6] Preparing workspace: %s\n" "$WORKDIR"
+if [[ "$PYTHON_ENV_MODE" != "auto" && "$PYTHON_ENV_MODE" != "conda" && "$PYTHON_ENV_MODE" != "venv" ]]; then
+  echo "ERROR: --python-env must be one of auto|conda|venv"
+  exit 7
+fi
+
+printf "[1/7] Preparing workspace: %s\n" "$WORKDIR"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-printf "[2/6] Getting EasySteer source...\n"
+printf "[2/7] Getting EasySteer source...\n"
 if [[ -n "$LOCAL_SOURCE" ]]; then
   if [[ ! -e "$LOCAL_SOURCE" ]]; then
     echo "ERROR: --source path does not exist: $LOCAL_SOURCE"
@@ -84,21 +93,48 @@ fi
 
 cd EasySteer
 
-printf "[3/6] Checking conda...\n"
-if ! command -v conda >/dev/null 2>&1; then
-  echo "ERROR: conda not found. Install Miniconda/Anaconda first."
-  exit 3
-fi
+activate_python_env() {
+  local mode="$1"
+  if [[ "$mode" == "conda" || "$mode" == "auto" ]]; then
+    if command -v conda >/dev/null 2>&1; then
+      # shellcheck disable=SC1091
+      source "$(conda info --base)/etc/profile.d/conda.sh"
+      if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+        conda create -y -n "$ENV_NAME" python=3.10
+      fi
+      conda activate "$ENV_NAME"
+      echo "conda"
+      return 0
+    elif [[ "$mode" == "conda" ]]; then
+      echo "ERROR: conda requested but not found."
+      exit 3
+    fi
+  fi
 
-# shellcheck disable=SC1091
-source "$(conda info --base)/etc/profile.d/conda.sh"
-printf "[4/6] Creating/activating env: %s\n" "$ENV_NAME"
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-  conda create -y -n "$ENV_NAME" python=3.10
-fi
-conda activate "$ENV_NAME"
+  if [[ "$mode" == "venv" || "$mode" == "auto" ]]; then
+    local venv_dir="$WORKDIR/.venv_${ENV_NAME}"
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "ERROR: python3 not found for venv mode."
+      exit 8
+    fi
+    if [[ ! -d "$venv_dir" ]]; then
+      python3 -m venv "$venv_dir"
+    fi
+    # shellcheck disable=SC1091
+    source "$venv_dir/bin/activate"
+    echo "venv"
+    return 0
+  fi
 
-printf "[5/6] Installing dependencies...\n"
+  echo "ERROR: unable to initialize any Python environment."
+  exit 9
+}
+
+printf "[3/7] Initializing Python environment...\n"
+ACTIVE_ENV="$(activate_python_env "$PYTHON_ENV_MODE")"
+printf "[4/7] Active env backend: %s\n" "$ACTIVE_ENV"
+
+printf "[5/7] Installing dependencies...\n"
 if [[ -f requirements.txt ]]; then
   pip install -r requirements.txt
 elif [[ -f setup.py || -f pyproject.toml ]]; then
@@ -107,7 +143,7 @@ else
   echo "WARNING: No requirements.txt/setup.py/pyproject.toml found."
 fi
 
-printf "[6/6] Detecting experiment entrypoint...\n"
+printf "[6/7] Detecting experiment entrypoint...\n"
 if [[ -f scripts/train.sh ]]; then
   echo "Found scripts/train.sh"
   echo "Run: bash scripts/train.sh"
@@ -118,4 +154,5 @@ else
   echo "No standard train entrypoint found. Please check README."
 fi
 
+printf "[7/7] Environment ready.\n"
 echo "Bootstrap complete."
